@@ -1,5 +1,5 @@
 # -*- encoding:utf-8 -*-
-# !/usr/bin/env python
+#!/usr/bin/env python
 
 """
 Author: "Hunter Sun"
@@ -8,7 +8,7 @@ Author: "Hunter Sun"
 
 import pymysql
 import os
-import time, datetime
+import time,datetime
 import json
 import math
 import requests
@@ -30,70 +30,78 @@ config = {
 
 
 class Marathonautoscale(object):
-    def __init__(self):
+    def __init__(self, marathon_host, app_id):
+        self.marathon_host = marathon_host
+        self.app_id = app_id
         self.now_instances = 1
         self.scale_in = 0
         self.scale_out = 0
         self.auth = ('dcosadmin', 'zjdcos01')
-        self.scale_rule = self.get_scale_rule_from_db()
+        self.uri = ("http://" + marathon_host + ":8080")
 
     def get_scale_rule_from_db(self):
-        conn = pymysql.connect(**config)
-        cur = conn.cursor()
-        try:
-            cur.execute("select * from app_scale_rule")
-            rows = cur.fetchall()
-            for row in rows:
-                temp = {
-                    'marathon_name': row[0],
-                    'app_id': row[1],
-                    'max_scale_num': row[2],
-                    'per_auto_scale': row[3],
-                    'memory': row[4],
-                    'cpu': row[5],
-                    'thread': row[6],
-                    'switch': row[7],
-                    'cold-time': row[8],
-                    'collect-period': row[9],
-                    'continue-period': row[10]
-                }
-                print("DEBUG------------temp---------:%s  %s " % (temp,temp['switch']))
-                if temp['switch']:
-                    print("Hellllllllllllllllllllll")
-                    scale_rule[temp['marathon_name']][temp['app_id']] = temp
-                    print("scaleu -----------------%s" % scale_rule)
-                    print("scale cp %s" % scale_rule[temp['marathon_name']][temp['app_id']]['switch'])
-                    if scale_rule[scale_rule[temp['marathon_name']][temp['app_id']]['cpu']]:
-                        try:
-                            cur.execute("select * from quota_info where app_id = %s AND rule_type=%s",
-                                        (scale_rule[temp['app_id']], "cpu"))
-                            rows = cur.fetchall()
-                            for row in rows:
-                                print("DEBUG====dcosinit======{},{}".format(row[0], row[1]))
-                                scale_rule[temp['marathon_name']]['cpu_max_threshold'] = row[3]
-                                scale_rule[temp['marathon_name']]['cpu_min_threshold'] = row[4]
-                        except Exception as e:
-                            print(e)
-                    if scale_rule[temp['marathon_name']['app_id']['memory']]:
-                        try:
-                            cur.execute("select * from quota_info where app_id = %s AND rule_type=%s",
-                                        (scale_rule[temp['marathon_name']][temp['app_id']], "memory"))
-                            rows = cur.fetchall()
-                            for row in rows:
-                                print("DEBUG====dcosinit======{},{}".format(row[0], row[1]))
-                                scale_rule[temp['marathon_name']]['mem_max_threshold'] = row[3]
-                                scale_rule[temp['marathon_name']]['mem_min_threshold'] = row[4]
-                        except Exception as e:
-                            print(e)
-                    print("the scale rule: %s " % scale_rule)
-                else:
-                    print("This app's scale switch is off!")
-        except Exception as e:
-            print(e)
-        cur.close()
-        conn.close()
-        timer()
-        return scale_rule
+        pass
+
+    def get_app_details(self):
+        response = requests.get(self.uri + '/v2/apps/' + self.app_id, auth=self.auth).json()
+        if response['app']['tasks'] == []:
+            print ('No task data on Marathon for App !', self.app_id)
+        else:
+            app_instances = response['app']['instances']
+            self.appinstances = app_instances
+            print(self.app_id, "has", self.appinstances, "deployed instances")
+            app_task_dict = {}
+            for i in response['app']['tasks']:
+                taskid = i['id']
+                hostid = i['host']
+                print ('DEBUG - taskId=', taskid + ' running on ' + hostid)
+                app_task_dict[str(taskid)] = str(hostid)
+            return app_task_dict
+
+    def get_task_agentstatistics(self, task, host):
+        # Get the performance Metrics for all the tasks for the Marathon App specified
+        # by connecting to the Mesos Agent and then making a REST call against Mesos statistics
+        # Return to Statistics for the specific task for the marathon_app
+        response = requests.get('http://' + host + ':5051/monitor/statistics.json').json()
+        # print ('DEBUG -- Getting Mesos Metrics for Mesos Agent =',host)
+        for i in response:
+            executor_id = i['executor_id']
+            # print("DEBUG -- Printing each Executor ID ", executor_id)
+            if executor_id == task:
+                task_stats = i['statistics']
+                # print ('****Specific stats for task',executor_id,'=',task_stats)
+                return task_stats
+
+    def showstatics(self):
+        return self.get_avg_cpu_mem(self.get_app_details())
+
+    def get_avg_cpu_mem(self, app_task_dict):
+        app_cpu_values = []
+        app_mem_values = []
+        for task, host in app_task_dict.items():
+            task_stats = self.get_task_agentstatistics(task, host)
+            cpus_time = (task_stats['cpus_system_time_secs'] + task_stats['cpus_user_time_secs'])
+            print("cpus_system_time_secs:", task_stats['cpus_system_time_secs'])
+            print("task_stats['cpus_user_time_secs']:", task_stats['cpus_user_time_secs'])
+            print ("Combined Task CPU Kernel and User Time for task", task, "=", cpus_time)
+            mem_rss_bytes = int(task_stats['mem_rss_bytes'])
+            print ("task", task, "mem_rss_bytes=", mem_rss_bytes)
+            mem_limit_bytes = int(task_stats['mem_limit_bytes'])
+            print ("task", task, "mem_limit_bytes=", mem_limit_bytes)
+            mem_utilization = 100 * (float(mem_rss_bytes) / float(mem_limit_bytes))
+            print ("task", task, "mem Utilization=", mem_utilization)
+            print()
+            app_cpu_values.append(cpus_time)
+            app_mem_values.append(mem_utilization)
+            print(app_cpu_values)
+            print(app_mem_values)
+            app_avg_cpu = (sum(app_cpu_values) / len(app_cpu_values))
+            print ('Current Average  CPU Time for app', self.app_id, '=', app_avg_cpu)
+            app_avg_mem = (sum(app_mem_values) / len(app_mem_values))
+            print ('Current Average Mem Utilization for app', self.app_id, '=', app_avg_mem)
+            # Evaluate whether an autoscale trigger is called for
+            print('\n')
+            return app_avg_cpu, app_avg_mem
 
     def scale_app(self, app, autoscale_multiplier):
         max_instances = scale_rule[app]['max_scale_num']
@@ -149,7 +157,7 @@ class Marathonautoscale(object):
                 print("need to scale out!")
                 return 2
             elif self.scale_in + len(now_quota_value):
-                print("need to scale in!")
+                print("need to scale out!")
                 return 1
             else:
                 return 0
@@ -220,13 +228,6 @@ def dcos_init(marathon_name, appid):
         conn.close()
         timer()
 
-def timer():
-    """
-    :this time is collect period.get from the db.
-    """
-    print("Successfully completed a cycle, sleeping for 5 seconds ...")
-    time.sleep(5)
-    return
 
 def test(marathon_obj):
     app_id = marathon_obj.app_id
@@ -241,8 +242,7 @@ def test(marathon_obj):
             print("DEBUG----------test---------memory: {}".format(memory))
             print("DEBUG----------test---------thread: {}".format(thread))
             try:
-                res = marathon_obj.scale(app_id, trigger_mode, now.strftime("%Y%m%d%H%M%S"), cpu=cpu, mem=memory,
-                                         thread=thread)
+                res = marathon_obj.scale(app_id, trigger_mode, now.strftime("%Y%m%d%H%M%S"), cpu=cpu, mem=memory, thread=thread)
                 if res == 0:
                     print (app_id, "No scale!")
                 elif res == 1:
@@ -261,14 +261,12 @@ def main(marathon_name, app_id):
     # marathon_name = "20.26.25.148"
     threads = []
     mat = Marathonautoscale(marathon_name, app_id)
-    t1 = threading.Thread(target=dcos_init, args=(marathon_name, app_id,))
+    t1 = threading.Thread(target=dcos_init, args=(marathon_name, app_id, ))
     threads.append(t1)
-    t2 = threading.Thread(target=test, args=(mat,))
+    t2 = threading.Thread(target=test, args=(mat, ))
     threads.append(t2)
     for i in threads:
         try:
             i.start()
         except Exception as e:
             print(e)
-
-
